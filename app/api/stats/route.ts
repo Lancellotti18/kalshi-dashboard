@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 
 const BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const KEY_ID = process.env.KALSHI_API_KEY_ID ?? "";
-const RAW_KEY = (process.env.KALSHI_PRIVATE_KEY ?? "").replace(/\\n/g, "\n").trim();
+const RAW_KEY = Buffer.from(process.env.KALSHI_PRIVATE_KEY ?? "", "base64").toString("utf8").trim();
 
 function makeHeaders(method: string, urlPath: string): Record<string, string> {
   const ts = Date.now().toString();
