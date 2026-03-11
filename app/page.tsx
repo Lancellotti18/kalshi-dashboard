@@ -177,6 +177,8 @@ export default function Dashboard() {
   const pnlUsd = pnl / 100;
   const bannerClass = pnlUsd > 0 ? "positive" : pnlUsd < 0 ? "negative" : "neutral";
   const pnlColor = pnlUsd > 0 ? "var(--green)" : pnlUsd < 0 ? "var(--red)" : "var(--muted)";
+  const positions = data?.positions ?? [];
+  const unrealizedTotal = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
 
   return (
     <>
@@ -278,8 +280,10 @@ export default function Dashboard() {
             {loading ? "—" : fmtUsd(pnl, true)}
           </div>
           <div className="profit-banner-sub">
-            {data
-              ? `Realized P&L · Balance: ${fmtUsd(data.balanceCents)} · Portfolio: ${fmtUsd(data.portfolioValueCents)}`
+            {data && !data.error
+              ? `Realized P&L · Balance: ${fmtUsd(data.balanceCents ?? 0)} · Portfolio: ${fmtUsd(data.portfolioValueCents ?? 0)}`
+              : data?.error
+              ? "API error — check credentials"
               : "Loading Kalshi account data..."}
           </div>
         </div>
@@ -300,13 +304,13 @@ export default function Dashboard() {
           </div>
           <div className="card">
             <div className="card-label">Open Positions</div>
-            <div className="card-value orange">{data ? data.positions.length : "—"}</div>
-            <div className="card-sub">{data?.positions.length === 1 ? "1 market" : `${data?.positions.length ?? 0} markets`}</div>
+            <div className="card-value orange">{data ? positions.length : "—"}</div>
+            <div className="card-sub">{positions.length === 1 ? "1 market" : `${positions.length} markets`}</div>
           </div>
           <div className="card">
             <div className="card-label">Unrealized P&L</div>
-            <div className="card-value" style={{ color: data ? (data.positions.reduce((s, p) => s + p.unrealizedPnl, 0) >= 0 ? "var(--green)" : "var(--red)") : "var(--muted)" }}>
-              {data ? fmtUsd(data.positions.reduce((s, p) => s + p.unrealizedPnl, 0), true) : "—"}
+            <div className="card-value" style={{ color: data ? (unrealizedTotal >= 0 ? "var(--green)" : "var(--red)") : "var(--muted)" }}>
+              {data ? fmtUsd(unrealizedTotal, true) : "—"}
             </div>
             <div className="card-sub">open positions</div>
           </div>
@@ -323,8 +327,8 @@ export default function Dashboard() {
               <>
                 <div className="pnl-row"><span className="pnl-label">Realized P&L</span><span className="pnl-value" style={{ color: pnlColor }}>{fmtUsd(pnl, true)}</span></div>
                 <div className="pnl-row"><span className="pnl-label">Unrealized P&L</span>
-                  <span className="pnl-value" style={{ color: data.positions.reduce((s, p) => s + p.unrealizedPnl, 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {fmtUsd(data.positions.reduce((s, p) => s + p.unrealizedPnl, 0), true)}
+                  <span className="pnl-value" style={{ color: unrealizedTotal >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {fmtUsd(unrealizedTotal, true)}
                   </span>
                 </div>
                 <div className="pnl-row"><span className="pnl-label">Available Balance</span><span className="pnl-value green">{fmtUsd(data.balanceCents)}</span></div>
@@ -365,10 +369,10 @@ export default function Dashboard() {
         <div className="section">
           <div className="section-header">
             <span>Open Positions</span>
-            <span style={{ color: "var(--orange)" }}>{data?.positions.length ?? 0}</span>
+            <span style={{ color: "var(--orange)" }}>{positions.length}</span>
           </div>
           <div className="section-body">
-            {data?.positions.length ? data.positions.map((p) => {
+            {positions.length ? positions.map((p) => {
               const side = p.position > 0 ? "yes" : "no";
               const unPnl = p.unrealizedPnl / 100;
               return (
