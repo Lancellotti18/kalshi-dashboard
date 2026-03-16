@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const REFRESH_SEC = 30;
-const HISTORY_KEY = "kalshi_pnl_history";
+const REFRESH_SEC  = 30;
+const HISTORY_KEY  = "kalshi_pnl_history";
+const BET_HIST_KEY = "kalshi_bet_history";
 
 interface Stats {
   pnlCents: number;
@@ -24,19 +25,31 @@ interface Position {
   cost: number;
 }
 
-interface Signal {
+interface LiveBet {
+  ticker: string;
+  title: string;
+  position: number;
+  side: "yes" | "no";
+  costCents: number;
+  unrealizedPnlCents: number;
+  realizedPnlCents: number;
+  status: string;
+  result: string | null;
+  yesBid: number;
+  yesAsk: number;
+  lastPrice: number;
+  closeTime: string;
+  expectedExpiration: string;
+}
+
+interface SettledBet {
   ticker: string;
   title: string;
   side: "yes" | "no";
-  entryPriceCents: number;
-  conviction: number;
-  imbalance: number;
-  volumeScore: number;
-  volume: number;
-  hoursToClose: number;
-  allocatedUsd: number;
-  contracts: number;
-  maxProfit: number;
+  costCents: number;
+  realizedPnlCents: number;
+  result: string | null;
+  settledAt: number;
 }
 
 interface HistoryPoint { ts: number; pnl: number; }
@@ -47,26 +60,33 @@ function loadHistory(): HistoryPoint[] {
 function saveHistory(h: HistoryPoint[]) {
   try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h)); } catch { /**/ }
 }
+function loadBetHistory(): SettledBet[] {
+  try { return JSON.parse(localStorage.getItem(BET_HIST_KEY) ?? "[]"); } catch { return []; }
+}
+function saveBetHistory(h: SettledBet[]) {
+  try { localStorage.setItem(BET_HIST_KEY, JSON.stringify(h)); } catch { /**/ }
+}
 function fmtUsd(cents: number, sign = false): string {
   const v = cents / 100;
   const abs = Math.abs(v).toFixed(2);
   return sign ? (v >= 0 ? "+" : "−") + "$" + abs : "$" + abs;
 }
 function fmtHours(h: number): string {
+  if (h < 1) return Math.round(h * 60) + "m";
   if (h < 24) return h.toFixed(0) + "h";
   return (h / 24).toFixed(1) + "d";
 }
 
 export default function Dashboard() {
   const [data, setData]         = useState<Stats | null>(null);
-  const [signals, setSignals]   = useState<Signal[]>([]);
-  const [signalMeta, setSignalMeta] = useState<{ scanned: number; ts: number } | null>(null);
   const [history, setHistory]   = useState<HistoryPoint[]>([]);
+  const [liveBets, setLiveBets] = useState<LiveBet[]>([]);
+  const [settledBets, setSettledBets] = useState<SettledBet[]>([]);
+  const [liveBetsLoading, setLiveBetsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<"live" | "history" | "pnl" | "chart">("live");
   const [countdown, setCountdown] = useState(REFRESH_SEC);
   const [lastUpdate, setLastUpdate] = useState("");
   const [loading, setLoading]   = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [signalsLoading, setSignalsLoading] = useState(false);
   const chartRef = useRef<HTMLCanvasElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const chartInstance = useRef<any>(null);
@@ -89,33 +109,52 @@ export default function Dashboard() {
     setCountdown(REFRESH_SEC);
   }, []);
 
-  const fetchSignals = useCallback(async () => {
-    setSignalsLoading(true);
+  const fetchLiveBets = useCallback(async () => {
+    setLiveBetsLoading(true);
     try {
-      const res = await fetch("/api/signals");
+      const res = await fetch("/api/live-bets");
       const json = await res.json();
-      setSignals(json.signals ?? []);
-      setSignalMeta({ scanned: json.scanned ?? 0, ts: json.ts ?? Date.now() });
+      const incoming: LiveBet[] = json.bets ?? [];
+      setLiveBets(incoming);
+
+      // Move settled bets into history
+      const hist = loadBetHistory();
+      incoming.forEach(b => {
+        if ((b.status === "finalized" || b.status === "settled" || b.result) && b.result) {
+          if (!hist.some(h => h.ticker === b.ticker)) {
+            hist.push({
+              ticker: b.ticker,
+              title: b.title,
+              side: b.side,
+              costCents: b.costCents,
+              realizedPnlCents: b.realizedPnlCents,
+              result: b.result,
+              settledAt: Date.now(),
+            });
+          }
+        }
+      });
+      if (hist.length > 200) hist.splice(0, hist.length - 200);
+      saveBetHistory(hist);
+      setSettledBets([...hist].reverse());
     } catch (e) { console.error(e); }
-    finally { setSignalsLoading(false); }
+    finally { setLiveBetsLoading(false); }
   }, []);
 
   useEffect(() => {
     setHistory(loadHistory());
+    setSettledBets([...loadBetHistory()].reverse());
     fetchStats();
+    fetchLiveBets();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchStats]);
 
   useEffect(() => {
     const t = setInterval(() => {
-      setCountdown((c) => { if (c <= 1) { fetchStats(); return REFRESH_SEC; } return c - 1; });
+      setCountdown((c) => { if (c <= 1) { fetchStats(); fetchLiveBets(); return REFRESH_SEC; } return c - 1; });
     }, 1000);
     return () => clearInterval(t);
-  }, [fetchStats]);
-
-  // Fetch signals when sidebar opens
-  useEffect(() => {
-    if (sidebarOpen && signals.length === 0) fetchSignals();
-  }, [sidebarOpen, signals.length, fetchSignals]);
+  }, [fetchStats, fetchLiveBets]);
 
   // Chart
   useEffect(() => {
@@ -180,78 +219,23 @@ export default function Dashboard() {
   const positions = data?.positions ?? [];
   const unrealizedTotal = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
 
+  // Projected winnings across all open bets
+  const openBets = liveBets.filter(b => !b.result);
+  const projTotalPlacedCents  = openBets.reduce((s, b) => s + b.costCents, 0);
+  const projTotalPayoutCents  = openBets.reduce((s, b) => s + Math.abs(b.position) * 100, 0);
+  const projTotalProfitCents  = projTotalPayoutCents - projTotalPlacedCents;
+
+  // Profit tracker bar
+  const realizedProfit  = Math.max(0, pnl);          // locked-in wins (cents)
+  const realizedLoss    = Math.max(0, -pnl);          // locked-in losses (cents)
+  const barScale        = Math.max(1, realizedProfit + projTotalProfitCents + realizedLoss);
+  const realizedPct     = (realizedProfit / barScale) * 100;
+  const projectedPct    = (projTotalProfitCents / barScale) * 100;
+  const lossPct         = (realizedLoss / barScale) * 100;
+  const totalPotential  = pnl + projTotalProfitCents; // best-case total
+
   return (
     <>
-      {/* Sidebar overlay */}
-      {sidebarOpen && (
-        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
-      )}
-
-      {/* Sidebar */}
-      <div className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
-        <div className="sidebar-header">
-          <div>
-            <div className="sidebar-title">Practice Trades</div>
-            <div className="sidebar-sub">What the bot would do right now — no real money</div>
-          </div>
-          <button className="sidebar-close" onClick={() => setSidebarOpen(false)}>✕</button>
-        </div>
-
-        {signalMeta && (
-          <div className="sidebar-meta">
-            Scanned {signalMeta.scanned} markets · {new Date(signalMeta.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            <button className="refresh-btn" onClick={fetchSignals} disabled={signalsLoading}>
-              {signalsLoading ? "..." : "↺ Refresh"}
-            </button>
-          </div>
-        )}
-
-        <div className="sidebar-body">
-          {signalsLoading && signals.length === 0 ? (
-            <div className="empty" style={{ padding: "40px 0" }}>
-              <div className="empty-icon">⏳</div>
-              <div className="empty-sub">Scanning markets...</div>
-            </div>
-          ) : signals.length === 0 ? (
-            <div className="empty" style={{ padding: "40px 0" }}>
-              <div className="empty-icon">🔍</div>
-              <div className="empty-title">No signals right now</div>
-              <div className="empty-sub">No markets currently meet the conviction threshold. Try refreshing.</div>
-            </div>
-          ) : (
-            signals.map((s, i) => {
-              const convPct = Math.round(s.conviction * 100);
-              const convColor = convPct >= 75 ? "var(--green)" : convPct >= 65 ? "var(--orange)" : "var(--muted)";
-              return (
-                <div key={s.ticker} className="signal-card">
-                  <div className="signal-rank">#{i + 1}</div>
-                  <div className="signal-body">
-                    <div className="signal-title">{s.title.slice(0, 65)}</div>
-                    <div className="signal-ticker">{s.ticker}</div>
-                    <div className="signal-tags">
-                      <span className={`side-badge side-${s.side}`}>{s.side.toUpperCase()}</span>
-                      <span className="tag-price">{s.entryPriceCents}¢</span>
-                      <span className="tag-time">{fmtHours(s.hoursToClose)}</span>
-                    </div>
-                    <div className="conviction-row">
-                      <div className="conviction-bar-wrap">
-                        <div className="conviction-bar-fill" style={{ width: convPct + "%", background: convColor }} />
-                      </div>
-                      <span style={{ color: convColor, fontWeight: 700 }}>{convPct}%</span>
-                    </div>
-                    <div className="signal-trade">
-                      <span className="signal-trade-label">Would buy</span>
-                      <span className="signal-trade-val">{s.contracts} contracts · ${s.allocatedUsd.toFixed(2)}</span>
-                      <span className="signal-profit green">max profit +${s.maxProfit.toFixed(2)}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </div>
-
       {/* Header */}
       <div className="header">
         <div className="header-left">
@@ -260,12 +244,9 @@ export default function Dashboard() {
           <span className="badge">LIVE</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button className="practice-btn" onClick={() => setSidebarOpen(true)}>
-            🧪 Practice Trades
-          </button>
           <div className="refresh-info">
-            {countdown}s<br />
-            <span style={{ color: "var(--muted)" }}>{lastUpdate}</span>
+            Refreshes in {countdown}s
+            {lastUpdate && <span style={{ color: "var(--muted)", marginLeft: 6 }}>{lastUpdate}</span>}
           </div>
         </div>
       </div>
@@ -275,18 +256,68 @@ export default function Dashboard() {
 
         {/* Profit Made Banner */}
         <div className={`profit-banner ${bannerClass}`}>
-          <div className="profit-banner-label">Profit Made</div>
+          <div className="profit-banner-label">Total Profit / Loss</div>
           <div className="profit-banner-value" style={{ color: pnlColor }}>
             {loading ? "—" : fmtUsd(pnl, true)}
           </div>
           <div className="profit-banner-sub">
             {data && !data.error
-              ? `Realized P&L · Balance: ${fmtUsd(data.balanceCents ?? 0)} · Portfolio: ${fmtUsd(data.portfolioValueCents ?? 0)}`
+              ? `Balance: ${fmtUsd(data.balanceCents ?? 0)} · Portfolio: ${fmtUsd(data.portfolioValueCents ?? 0)} · ${liveBets.length} open bet${liveBets.length !== 1 ? "s" : ""}`
               : data?.error
               ? "API error — check credentials"
-              : "Loading Kalshi account data..."}
+              : "Connecting to Kalshi..."}
           </div>
         </div>
+
+        {/* Profit Tracker Bar */}
+        {(openBets.length > 0 || pnl !== 0) && (
+          <div className="profit-tracker">
+            <div className="pt-header">
+              <span className="pt-title">Profit Tracker</span>
+              <span className="pt-meta">
+                {openBets.length > 0 ? `${openBets.length} bet${openBets.length !== 1 ? "s" : ""} pending` : "all bets settled"}
+              </span>
+            </div>
+
+            {/* Bar */}
+            <div className="pt-bar-wrap">
+              {lossPct > 0 && (
+                <div className="pt-bar-seg pt-bar-loss" style={{ width: `${lossPct}%` }} title={`Locked loss: ${fmtUsd(-pnl)}`} />
+              )}
+              {realizedPct > 0 && (
+                <div className="pt-bar-seg pt-bar-realized" style={{ width: `${realizedPct}%` }} title={`Locked profit: ${fmtUsd(realizedProfit)}`} />
+              )}
+              {projectedPct > 0 && (
+                <div className="pt-bar-seg pt-bar-projected" style={{ width: `${projectedPct}%` }} title={`Projected: +${fmtUsd(projTotalProfitCents)}`} />
+              )}
+            </div>
+
+            {/* Legend row */}
+            <div className="pt-legend">
+              <div className="pt-leg-item">
+                <span className="pt-leg-dot" style={{ background: "var(--green)" }} />
+                <span className="pt-leg-label">Locked In</span>
+                <span className="pt-leg-val" style={{ color: pnl >= 0 ? "var(--green)" : "var(--red)" }}>
+                  {fmtUsd(pnl, true)}
+                </span>
+              </div>
+              {openBets.length > 0 && (
+                <div className="pt-leg-item">
+                  <span className="pt-leg-dot" style={{ background: "rgba(34,197,94,0.35)" }} />
+                  <span className="pt-leg-label">Projected</span>
+                  <span className="pt-leg-val" style={{ color: "var(--green)" }}>+{fmtUsd(projTotalProfitCents)}</span>
+                </div>
+              )}
+              <div className="pt-leg-item">
+                <span className="pt-leg-dot" style={{ background: "var(--blue)" }} />
+                <span className="pt-leg-label">Best Case Total</span>
+                <span className="pt-leg-val" style={{ color: totalPotential >= 0 ? "var(--green)" : "var(--red)" }}>
+                  {fmtUsd(totalPotential, true)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Stats Cards */}
         <div className="cards">
@@ -303,9 +334,9 @@ export default function Dashboard() {
             <div className="card-sub">cash + positions</div>
           </div>
           <div className="card">
-            <div className="card-label">Open Positions</div>
-            <div className="card-value orange">{data ? positions.length : "—"}</div>
-            <div className="card-sub">{positions.length === 1 ? "1 market" : `${positions.length} markets`}</div>
+            <div className="card-label">Open Bets</div>
+            <div className="card-value orange">{liveBetsLoading && liveBets.length === 0 ? "…" : liveBets.length}</div>
+            <div className="card-sub">{liveBets.length === 1 ? "1 market" : `${liveBets.length} markets`}</div>
           </div>
           <div className="card">
             <div className="card-label">Unrealized P&L</div>
@@ -316,89 +347,214 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* P&L Section */}
-        <div className="section">
-          <div className="section-header">
-            <span>Profit / Loss</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>from Kalshi account</span>
-          </div>
-          <div className="section-body">
-            {data && !data.error ? (
-              <>
-                <div className="pnl-row"><span className="pnl-label">Realized P&L</span><span className="pnl-value" style={{ color: pnlColor }}>{fmtUsd(pnl, true)}</span></div>
-                <div className="pnl-row"><span className="pnl-label">Unrealized P&L</span>
-                  <span className="pnl-value" style={{ color: unrealizedTotal >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {fmtUsd(unrealizedTotal, true)}
-                  </span>
+        {/* Tab bar */}
+        <div className="tab-bar">
+          {(["live","history","pnl","chart"] as const).map(tab => (
+            <button
+              key={tab}
+              className={`tab-btn${activeTab === tab ? " tab-active" : ""}`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab === "live"    ? `Live Bets${liveBets.length ? ` (${liveBets.length})` : ""}` :
+               tab === "history" ? `History${settledBets.length ? ` (${settledBets.length})` : ""}` :
+               tab === "pnl"     ? "P&L" : "Chart"}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Live Bets tab ── */}
+        {activeTab === "live" && (
+          <div className="section">
+            <div className="section-header">
+              <span>Live Bets</span>
+              <button className="refresh-btn" onClick={fetchLiveBets} disabled={liveBetsLoading}>
+                {liveBetsLoading ? "..." : "↺ Refresh"}
+              </button>
+            </div>
+            <div className="section-body" style={{ padding: 0 }}>
+              {liveBetsLoading && liveBets.length === 0 ? (
+                <div className="empty"><div className="empty-sub">Loading bets...</div></div>
+              ) : liveBets.length === 0 ? (
+                <div className="empty">
+                  <div className="empty-icon">🎯</div>
+                  <div className="empty-title">No open bets</div>
+                  <div className="empty-sub">The bot will place bets on the next scan cycle.</div>
                 </div>
-                <div className="pnl-row"><span className="pnl-label">Available Balance</span><span className="pnl-value green">{fmtUsd(data.balanceCents)}</span></div>
-                <div className="pnl-row"><span className="pnl-label">Portfolio Value</span><span className="pnl-value blue">{fmtUsd(data.portfolioValueCents)}</span></div>
-              </>
-            ) : (
-              <div className="empty">
-                <div className="empty-icon">📊</div>
-                <div className="empty-title">{loading ? "Loading..." : "No data"}</div>
-                <div className="empty-sub">{data?.error ?? "Connecting to Kalshi..."}</div>
-              </div>
-            )}
-          </div>
-        </div>
+              ) : liveBets.map((b) => {
+                const won     = b.result === b.side;
+                const settled = !!b.result;
+                const icon    = settled ? (won ? "✓" : "✗") : "→";
+                const iconClr = settled ? (won ? "var(--green)" : "var(--red)") : "var(--orange)";
+                const costUsd = b.costCents / 100;
+                const contracts = Math.abs(b.position);
+                // Payout = contracts × $1.00 if we win
+                const payoutUsd = contracts * 1.00;
+                const profitUsd = payoutUsd - costUsd;
+                const unPnl = b.unrealizedPnlCents / 100;
+                const resolveTime = b.expectedExpiration || b.closeTime;
+                const hrsLeft = resolveTime
+                  ? Math.max(0, (new Date(resolveTime).getTime() - Date.now()) / 3_600_000)
+                  : null;
+                // Human-readable bet description
+                const betLabel = b.side === "yes"
+                  ? `Betting YES — ${b.title}`
+                  : `Betting NO — ${b.title}`;
 
-        {/* Chart */}
-        <div className="section">
-          <div className="section-header">
-            <span>Profit Over Time</span>
-            <span style={{ fontSize: 10, color: "var(--muted)" }}>
-              <span style={{ color: "var(--blue)" }}>━</span> actual &nbsp;
-              <span style={{ color: "var(--orange)" }}>╌</span> trend
-            </span>
-          </div>
-          <div className="section-body">
-            {history.length >= 2 ? (
-              <div className="chart-wrap"><canvas ref={chartRef} /></div>
-            ) : (
-              <div className="empty" style={{ padding: "24px 0" }}>
-                <div className="empty-icon">📈</div>
-                <div className="empty-sub">Chart builds as you open this page — each visit logs a data point.</div>
-              </div>
-            )}
-          </div>
-        </div>
+                return (
+                  <div key={b.ticker} className="bet-card">
+                    {/* Status icon + title */}
+                    <div className="bet-card-top">
+                      <div className="bet-status-icon" style={{ color: iconClr }}>{icon}</div>
+                      <div className="bet-card-info">
+                        <div className="bet-card-title">{betLabel}</div>
+                        <div className="bet-card-ticker">{b.ticker} · {contracts} contract{contracts !== 1 ? "s" : ""}</div>
+                      </div>
+                    </div>
 
-        {/* Open Positions */}
-        <div className="section">
-          <div className="section-header">
-            <span>Open Positions</span>
-            <span style={{ color: "var(--orange)" }}>{positions.length}</span>
-          </div>
-          <div className="section-body">
-            {positions.length ? positions.map((p) => {
-              const side = p.position > 0 ? "yes" : "no";
-              const unPnl = p.unrealizedPnl / 100;
-              return (
-                <div key={p.ticker} className="position-item">
-                  <div style={{ minWidth: 0 }}>
-                    <div className="position-ticker">{p.ticker}</div>
-                    <div className="position-market">{String(p.title).slice(0, 55)}</div>
-                    <div className="position-pnl" style={{ color: unPnl >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {unPnl >= 0 ? "+" : "−"}${Math.abs(unPnl).toFixed(2)} unrealized
+                    {/* Money row: placed → cash if win */}
+                    <div className="bet-money-row">
+                      <div className="bet-money-block">
+                        <div className="bet-money-label">Placed</div>
+                        <div className="bet-money-val">${costUsd.toFixed(2)}</div>
+                      </div>
+                      <div className="bet-money-arrow">→</div>
+                      <div className="bet-money-block">
+                        <div className="bet-money-label">Cash if Win</div>
+                        <div className="bet-money-val green">${payoutUsd.toFixed(2)}</div>
+                      </div>
+                      <div className="bet-money-block">
+                        <div className="bet-money-label">Profit if Win</div>
+                        <div className="bet-money-val" style={{ color: "var(--green)" }}>+${profitUsd.toFixed(2)}</div>
+                      </div>
+                    </div>
+
+                    {/* Bottom row: status + time */}
+                    <div className="bet-card-footer">
+                      {settled ? (
+                        <span style={{ color: won ? "var(--green)" : "var(--red)", fontWeight: 700, fontSize: 13 }}>
+                          {won
+                            ? `Won +$${(b.realizedPnlCents / 100).toFixed(2)}`
+                            : `Lost -$${costUsd.toFixed(2)}`}
+                        </span>
+                      ) : (
+                        <span style={{ color: unPnl >= 0 ? "var(--green)" : "var(--red)", fontSize: 12 }}>
+                          Current P&L: {unPnl >= 0 ? "+" : "−"}${Math.abs(unPnl).toFixed(2)}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 11, color: hrsLeft !== null && hrsLeft < 2 ? "var(--orange)" : "var(--muted)" }}>
+                        {settled ? "Settled" : hrsLeft !== null ? `Closes in ${fmtHours(hrsLeft)}` : ""}
+                      </span>
                     </div>
                   </div>
-                  <div className="position-right">
-                    <span className={`side-badge side-${side}`}>{side.toUpperCase()}</span><br />
-                    <span style={{ fontSize: 12, color: "var(--muted)" }}>Cost: ${(p.cost / 100).toFixed(2)}</span>
-                  </div>
-                </div>
-              );
-            }) : (
-              <div className="empty">
-                <div className="empty-icon">🎯</div>
-                <div className="empty-title">No open positions</div>
-                <div className="empty-sub">Active trades will appear here.</div>
-              </div>
-            )}
+                );
+              })}
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* ── History tab ── */}
+        {activeTab === "history" && (
+          <div className="section">
+            <div className="section-header">
+              <span>Bet History</span>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>settled bets</span>
+            </div>
+            <div className="section-body" style={{ padding: 0 }}>
+              {settledBets.length === 0 ? (
+                <div className="empty">
+                  <div className="empty-icon">📋</div>
+                  <div className="empty-title">No history yet</div>
+                  <div className="empty-sub">Settled bets will appear here automatically.</div>
+                </div>
+              ) : settledBets.map((b, i) => {
+                const won = b.result === b.side;
+                const pnlCents = b.realizedPnlCents;
+                return (
+                  <div key={b.ticker + i} className="bet-row">
+                    <div className="bet-icon" style={{ color: won ? "var(--green)" : "var(--red)", fontSize: 18 }}>
+                      {won ? "✓" : "✗"}
+                    </div>
+                    <div className="bet-body">
+                      <div className="bet-title">{b.title.slice(0, 60)}</div>
+                      <div className="bet-meta">
+                        <span className={`side-badge side-${b.side}`}>{b.side.toUpperCase()}</span>
+                        <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: 6 }}>
+                          {new Date(b.settledAt).toLocaleDateString([], { month: "short", day: "numeric" })}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="bet-right">
+                      <div className="bet-amounts">
+                        <span style={{ color: "var(--muted)", fontSize: 11 }}>Cost</span>
+                        <span style={{ fontWeight: 700, fontSize: 13 }}>${(b.costCents / 100).toFixed(2)}</span>
+                      </div>
+                      <div className="bet-amounts" style={{ marginTop: 2 }}>
+                        <span style={{ color: "var(--muted)", fontSize: 11 }}>{won ? "Profit" : "Loss"}</span>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: won ? "var(--green)" : "var(--red)" }}>
+                          {won ? `+$${(pnlCents / 100).toFixed(2)}` : `-$${(b.costCents / 100).toFixed(2)}`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── P&L tab ── */}
+        {activeTab === "pnl" && (
+          <div className="section">
+            <div className="section-header">
+              <span>Profit / Loss</span>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>live from Kalshi</span>
+            </div>
+            <div className="section-body">
+              {data && !data.error ? (
+                <>
+                  <div className="pnl-row"><span className="pnl-label">Realized P&L</span><span className="pnl-value" style={{ color: pnlColor }}>{fmtUsd(pnl, true)}</span></div>
+                  <div className="pnl-row"><span className="pnl-label">Unrealized P&L</span>
+                    <span className="pnl-value" style={{ color: unrealizedTotal >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {fmtUsd(unrealizedTotal, true)}
+                    </span>
+                  </div>
+                  <div className="pnl-row"><span className="pnl-label">Available Balance</span><span className="pnl-value green">{fmtUsd(data.balanceCents)}</span></div>
+                  <div className="pnl-row"><span className="pnl-label">Portfolio Value</span><span className="pnl-value blue">{fmtUsd(data.portfolioValueCents)}</span></div>
+                  <div className="pnl-row"><span className="pnl-label">Open Positions</span><span className="pnl-value orange">{liveBets.length}</span></div>
+                </>
+              ) : (
+                <div className="empty">
+                  <div className="empty-icon">📊</div>
+                  <div className="empty-title">{loading ? "Loading..." : "No data"}</div>
+                  <div className="empty-sub">{data?.error ?? "Connecting to Kalshi..."}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Chart tab ── */}
+        {activeTab === "chart" && (
+          <div className="section">
+            <div className="section-header">
+              <span>Profit Over Time</span>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                <span style={{ color: "var(--blue)" }}>━</span> actual &nbsp;
+                <span style={{ color: "var(--orange)" }}>╌</span> trend
+              </span>
+            </div>
+            <div className="section-body">
+              {history.length >= 2 ? (
+                <div className="chart-wrap"><canvas ref={chartRef} /></div>
+              ) : (
+                <div className="empty" style={{ padding: "24px 0" }}>
+                  <div className="empty-icon">📈</div>
+                  <div className="empty-sub">Chart builds as you open the app — each visit logs a point.</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </>
   );

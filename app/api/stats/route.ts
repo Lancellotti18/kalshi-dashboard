@@ -49,19 +49,30 @@ export async function GET() {
       kGet("/portfolio/positions"),
     ]);
 
-    const positions = (posData.market_positions ?? []).map((p: Record<string, unknown>) => ({
-      ticker: p.ticker,
-      title: p.market_title ?? p.ticker,
-      position: p.position,           // positive = YES, negative = NO
-      unrealizedPnl: p.unrealized_pnl ?? 0,
-      realizedPnl: p.realized_pnl ?? 0,
-      exposure: p.market_exposure ?? 0,
-      cost: p.total_cost ?? 0,
+    // Kalshi elections API uses _dollars suffix string fields and position_fp
+    const toCents = (v: unknown): number =>
+      Math.round(parseFloat(String(v ?? "0")) * 100);
+
+    // Only active positions (position_fp != 0)
+    const activePos = ((posData.market_positions ?? []) as Record<string, unknown>[])
+      .filter((p) => parseFloat(String(p.position_fp ?? "0")) !== 0);
+
+    const positions = activePos.map((p) => ({
+      ticker:       String(p.ticker ?? ""),
+      title:        String(p.market_title ?? p.ticker ?? ""),
+      position:     Math.round(parseFloat(String(p.position_fp ?? "0"))),
+      unrealizedPnl: 0, // computed in live-bets from market price
+      realizedPnl:  toCents(p.realized_pnl_dollars),
+      exposure:     toCents(p.market_exposure_dollars),
+      cost:         toCents(p.total_traded_dollars),
     }));
 
+    // P&L = sum of all realized P&L across positions
+    const totalRealizedPnlCents = positions.reduce((s, p) => s + p.realizedPnl, 0);
+
     return NextResponse.json({
-      pnlCents: bal.pnl ?? 0,
-      balanceCents: bal.balance ?? 0,
+      pnlCents:            totalRealizedPnlCents,
+      balanceCents:        bal.balance ?? 0,
       portfolioValueCents: bal.portfolio_value ?? 0,
       positions,
       ts: Date.now(),
