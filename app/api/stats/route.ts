@@ -53,22 +53,22 @@ export async function GET() {
     const toCents = (v: unknown): number =>
       Math.round(parseFloat(String(v ?? "0")) * 100);
 
-    const allPos = ((posData.market_positions ?? []) as Record<string, unknown>[]);
-
-    // P&L must include ALL positions — settled bets (position_fp = 0) still
-    // have realized_pnl_dollars (positive for wins, negative for losses).
-    // Filtering them out caused losses to silently vanish from the total.
-    const totalRealizedPnlCents = allPos.reduce(
-      (s, p) => s + toCents(p.realized_pnl_dollars),
-      0
+    // ── P&L: portfolio_value − starting_capital ───────────────────────────────
+    // Kalshi's /portfolio/positions only returns ACTIVE positions; settled ones
+    // are not included, so realized_pnl_dollars from positions is always 0.
+    // Instead, use portfolio_value (cash + open positions at market value) minus
+    // starting capital — this reliably captures every win and loss.
+    //
+    // TOTAL_CAPITAL_USD: set this in Vercel env vars to match your deposit amount.
+    // Defaults to 13 ($13) if not set.
+    const startingCapitalCents = Math.round(
+      parseFloat(process.env.TOTAL_CAPITAL_USD ?? "13") * 100
     );
-
-    // Always sum realized_pnl_dollars from ALL positions (active + settled).
-    // Do NOT use bal.pnl — the balance endpoint returns it as an integer in cents,
-    // and applying toCents() would multiply by 100 again giving a 100× inflated value.
-    const pnlCents = totalRealizedPnlCents;
+    const portfolioValueCents = bal.portfolio_value ?? 0;
+    const pnlCents = portfolioValueCents - startingCapitalCents;
 
     // Active positions (position_fp != 0) for the open bets display only
+    const allPos = ((posData.market_positions ?? []) as Record<string, unknown>[]);
     const activePos = allPos.filter(
       (p) => parseFloat(String(p.position_fp ?? "0")) !== 0
     );
@@ -85,8 +85,9 @@ export async function GET() {
 
     return NextResponse.json({
       pnlCents,
+      startingCapitalCents,
       balanceCents:        bal.balance ?? 0,
-      portfolioValueCents: bal.portfolio_value ?? 0,
+      portfolioValueCents,
       positions,
       ts: Date.now(),
     });

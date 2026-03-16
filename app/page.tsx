@@ -8,6 +8,7 @@ const BET_HIST_KEY = "kalshi_bet_history";
 
 interface Stats {
   pnlCents: number;
+  startingCapitalCents: number;
   balanceCents: number;
   portfolioValueCents: number;
   positions: Position[];
@@ -218,21 +219,26 @@ export default function Dashboard() {
   const pnlColor = pnlUsd > 0 ? "var(--green)" : pnlUsd < 0 ? "var(--red)" : "var(--muted)";
   const positions = data?.positions ?? [];
   const unrealizedTotal = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+  void unrealizedTotal;
 
-  // Projected winnings across all open bets
+  // Starting capital — from API (env-configured) or default $13
+  const startingCapitalCents = data?.startingCapitalCents ?? 1300;
+
+  // Projected winnings across all open bets (if all win)
   const openBets = liveBets.filter(b => !b.result);
-  const projTotalPlacedCents  = openBets.reduce((s, b) => s + b.costCents, 0);
-  const projTotalPayoutCents  = openBets.reduce((s, b) => s + Math.abs(b.position) * 100, 0);
-  const projTotalProfitCents  = projTotalPayoutCents - projTotalPlacedCents;
+  const projTotalPlacedCents = openBets.reduce((s, b) => s + b.costCents, 0);
+  const projTotalPayoutCents = openBets.reduce((s, b) => s + Math.abs(b.position) * 100, 0);
+  const projTotalProfitCents = projTotalPayoutCents - projTotalPlacedCents;
 
   // Profit tracker bar
-  const realizedProfit  = Math.max(0, pnl);          // locked-in wins (cents)
-  const realizedLoss    = Math.max(0, -pnl);          // locked-in losses (cents)
-  const barScale        = Math.max(1, realizedProfit + projTotalProfitCents + realizedLoss);
-  const realizedPct     = (realizedProfit / barScale) * 100;
-  const projectedPct    = (projTotalProfitCents / barScale) * 100;
-  const lossPct         = (realizedLoss / barScale) * 100;
-  const totalPotential  = pnl + projTotalProfitCents; // best-case total
+  // pnl = portfolio_value − starting_capital (positive = up, negative = down)
+  const netGain = Math.max(0, pnl);       // how much we're up (green)
+  const netLoss = Math.max(0, -pnl);      // how much we're down (red)
+  const barScale = Math.max(1, netGain + projTotalProfitCents + netLoss + startingCapitalCents * 0.1);
+  const gainPct  = (netGain / barScale) * 100;
+  const projectedPct = (projTotalProfitCents / barScale) * 100;
+  const lossPct  = (netLoss / barScale) * 100;
+  const totalPotential = pnl + projTotalProfitCents; // best-case total
 
   return (
     <>
@@ -284,8 +290,8 @@ export default function Dashboard() {
               {lossPct > 0 && (
                 <div className="pt-bar-seg pt-bar-loss" style={{ width: `${lossPct}%` }} title={`Locked loss: ${fmtUsd(-pnl)}`} />
               )}
-              {realizedPct > 0 && (
-                <div className="pt-bar-seg pt-bar-realized" style={{ width: `${realizedPct}%` }} title={`Locked profit: ${fmtUsd(realizedProfit)}`} />
+              {gainPct > 0 && (
+                <div className="pt-bar-seg pt-bar-realized" style={{ width: `${gainPct}%` }} title={`Net gain: ${fmtUsd(netGain)}`} />
               )}
               {projectedPct > 0 && (
                 <div className="pt-bar-seg pt-bar-projected" style={{ width: `${projectedPct}%` }} title={`Projected: +${fmtUsd(projTotalProfitCents)}`} />
