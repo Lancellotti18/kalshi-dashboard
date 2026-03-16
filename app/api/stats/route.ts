@@ -53,25 +53,39 @@ export async function GET() {
     const toCents = (v: unknown): number =>
       Math.round(parseFloat(String(v ?? "0")) * 100);
 
-    // Only active positions (position_fp != 0)
-    const activePos = ((posData.market_positions ?? []) as Record<string, unknown>[])
-      .filter((p) => parseFloat(String(p.position_fp ?? "0")) !== 0);
+    const allPos = ((posData.market_positions ?? []) as Record<string, unknown>[]);
+
+    // P&L must include ALL positions — settled bets (position_fp = 0) still
+    // have realized_pnl_dollars (positive for wins, negative for losses).
+    // Filtering them out caused losses to silently vanish from the total.
+    const totalRealizedPnlCents = allPos.reduce(
+      (s, p) => s + toCents(p.realized_pnl_dollars),
+      0
+    );
+
+    // Use balance-level pnl if Kalshi provides it (most accurate — tracked server-side)
+    const balPnl = bal.pnl ?? bal.pnl_dollars;
+    const pnlCents = balPnl !== undefined && balPnl !== null
+      ? toCents(balPnl)
+      : totalRealizedPnlCents;
+
+    // Active positions (position_fp != 0) for the open bets display only
+    const activePos = allPos.filter(
+      (p) => parseFloat(String(p.position_fp ?? "0")) !== 0
+    );
 
     const positions = activePos.map((p) => ({
-      ticker:       String(p.ticker ?? ""),
-      title:        String(p.market_title ?? p.ticker ?? ""),
-      position:     Math.round(parseFloat(String(p.position_fp ?? "0"))),
+      ticker:        String(p.ticker ?? ""),
+      title:         String(p.market_title ?? p.ticker ?? ""),
+      position:      Math.round(parseFloat(String(p.position_fp ?? "0"))),
       unrealizedPnl: 0, // computed in live-bets from market price
-      realizedPnl:  toCents(p.realized_pnl_dollars),
-      exposure:     toCents(p.market_exposure_dollars),
-      cost:         toCents(p.total_traded_dollars),
+      realizedPnl:   toCents(p.realized_pnl_dollars),
+      exposure:      toCents(p.market_exposure_dollars),
+      cost:          toCents(p.total_traded_dollars),
     }));
 
-    // P&L = sum of all realized P&L across positions
-    const totalRealizedPnlCents = positions.reduce((s, p) => s + p.realizedPnl, 0);
-
     return NextResponse.json({
-      pnlCents:            totalRealizedPnlCents,
+      pnlCents,
       balanceCents:        bal.balance ?? 0,
       portfolioValueCents: bal.portfolio_value ?? 0,
       positions,
