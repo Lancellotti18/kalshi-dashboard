@@ -63,11 +63,10 @@ export async function GET() {
       0
     );
 
-    // Use balance-level pnl if Kalshi provides it (most accurate — tracked server-side)
-    const balPnl = bal.pnl ?? bal.pnl_dollars;
-    const pnlCents = balPnl !== undefined && balPnl !== null
-      ? toCents(balPnl)
-      : totalRealizedPnlCents;
+    // Always sum realized_pnl_dollars from ALL positions (active + settled).
+    // Do NOT use bal.pnl — the balance endpoint returns it as an integer in cents,
+    // and applying toCents() would multiply by 100 again giving a 100× inflated value.
+    const pnlCents = totalRealizedPnlCents;
 
     // Active positions (position_fp != 0) for the open bets display only
     const activePos = allPos.filter(
